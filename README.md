@@ -115,4 +115,4 @@ The bot uses environment variables for configuration:
 
 ## License
 
-MIT License - see LICENSE file for details
+CC0 1.0 Universal - see LICENSE file for details
