@@ -92,9 +92,50 @@ async def process_youtube_video(message: discord.Message, url: str):
     video_path = None
     
     try:
-        # Create thread for responses
-        thread_name = f"Video Analysis - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        thread = await message.create_thread(name=thread_name[:100])
+        # Get or create thread for the message
+        thread = None
+        
+        # First check if the message already has a thread
+        if hasattr(message, 'thread') and message.thread:
+            thread = message.thread
+            logger.info(f"Using existing thread for message {message.id}")
+        else:
+            # Try to create a thread
+            try:
+                thread_name = f"Video Analysis - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                thread = await message.create_thread(name=thread_name[:100])
+                logger.info(f"Created new thread for message {message.id}")
+            except discord.HTTPException as e:
+                if e.code == 160004:  # Thread already exists
+                    # The thread exists but we need to find it
+                    # Check all active threads in the guild
+                    for t in message.guild.threads:
+                        # Check if this thread starts from our message
+                        if t.parent_id == message.channel.id:
+                            try:
+                                starter_message = await t.parent.fetch_message(t.id)
+                                if starter_message.id == message.id:
+                                    thread = t
+                                    logger.info(f"Found existing thread {t.id} for message {message.id}")
+                                    break
+                            except:
+                                # Not the right thread, continue
+                                pass
+                    
+                    # If we still can't find it, check archived threads
+                    if not thread:
+                        async for t in message.channel.archived_threads(limit=100):
+                            if t.id == message.id:
+                                thread = t
+                                logger.info(f"Found archived thread {t.id} for message {message.id}")
+                                break
+                    
+                    # Last resort - just use the channel
+                    if not thread:
+                        logger.warning(f"Could not find thread for message {message.id}, using channel")
+                        thread = message.channel
+                else:
+                    raise
         
         # Send initial status
         embed = discord.Embed(
