@@ -194,6 +194,96 @@ IMPORTANT: Return ONLY valid JSON without any markdown formatting or additional 
         except Exception as e:
             logger.warning(f"Could not delete file from Gemini: {e}")
 
+    async def translate_text(self, text: str, target_lang: str = "ru") -> str:
+        """Translate text to target language using Gemini"""
+        try:
+            lang_names = {
+                "ru": "Russian",
+                "en": "English",
+                "es": "Spanish",
+                "fr": "French",
+                "de": "German"
+            }
+            target_language = lang_names.get(target_lang, "Russian")
+
+            prompt = f"""Translate the following text to {target_language}.
+Preserve formatting, links, and structure. Return ONLY the translation without any additional commentary.
+
+Text to translate:
+{text}"""
+
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.model.generate_content(prompt)
+            )
+
+            translation = response.text.strip()
+            logger.info(f"Translated text to {target_language}")
+            return translation
+
+        except Exception as e:
+            logger.error(f"Translation failed: {e}")
+            raise
+
+    async def translate_image(self, image_path: str, target_lang: str = "ru") -> str:
+        """Extract text from image and translate to target language"""
+        try:
+            lang_names = {
+                "ru": "Russian",
+                "en": "English",
+                "es": "Spanish",
+                "fr": "French",
+                "de": "German"
+            }
+            target_language = lang_names.get(target_lang, "Russian")
+
+            # Upload image to Gemini
+            loop = asyncio.get_event_loop()
+            image_file = await loop.run_in_executor(
+                None,
+                lambda: genai.upload_file(path=image_path, display_name=Path(image_path).name)
+            )
+
+            try:
+                # Wait for processing
+                while image_file.state.name == "PROCESSING":
+                    await asyncio.sleep(1)
+                    image_file = await loop.run_in_executor(
+                        None,
+                        lambda: genai.get_file(image_file.name)
+                    )
+
+                if image_file.state.name != "ACTIVE":
+                    raise Exception(f"Image processing failed: {image_file.state.name}")
+
+                # Extract and translate text
+                prompt = f"""Analyze this image and:
+1. Extract all visible text from the image (OCR)
+2. Translate the extracted text to {target_language}
+3. Preserve the structure and formatting
+
+Return ONLY the translated text without any additional commentary or explanations.
+If there is no text in the image, respond with "[No text found in image]"."""
+
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.model.generate_content([image_file, prompt])
+                )
+
+                translation = response.text.strip()
+                logger.info(f"Extracted and translated text from image to {target_language}")
+
+                return translation
+
+            finally:
+                # Clean up uploaded image
+                await self._cleanup_gemini_file(image_file)
+
+        except Exception as e:
+            logger.error(f"Image translation failed: {e}")
+            raise
+
 # For testing
 async def main():
     import sys

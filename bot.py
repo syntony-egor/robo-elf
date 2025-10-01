@@ -3,7 +3,10 @@ from discord.ext import commands
 import asyncio
 import logging
 import traceback
+import os
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from config import DISCORD_TOKEN
 from youtube_downloader import YouTubeDownloader
 from gemini_processor import GeminiProcessor
@@ -49,41 +52,66 @@ async def on_raw_reaction_add(payload):
     # Skip if bot's own reaction
     if payload.user_id == bot.user.id:
         return
-    
+
+    emoji_str = str(payload.emoji)
+
     # Check if it's the magic wand emoji
-    if str(payload.emoji) != '🪄':
-        return
-    
-    # Create unique key for this reaction
-    reaction_key = f"{payload.message_id}_{payload.user_id}_{payload.emoji}"
-    if reaction_key in processed_reactions:
-        return
-    processed_reactions.add(reaction_key)
-    
-    try:
-        # Get the channel and message
-        channel = bot.get_channel(payload.channel_id)
-        if not channel:
+    if emoji_str == '🪄':
+        # Create unique key for this reaction
+        reaction_key = f"{payload.message_id}_{payload.user_id}_{payload.emoji}"
+        if reaction_key in processed_reactions:
             return
-        
-        message = await channel.fetch_message(payload.message_id)
-        
-        # Extract YouTube URLs from the message
-        urls = youtube_downloader.extract_youtube_urls(message.content)
-        
-        if not urls:
-            logger.info(f"No YouTube URLs found in message {message.id}")
+        processed_reactions.add(reaction_key)
+
+        try:
+            # Get the channel and message
+            channel = bot.get_channel(payload.channel_id)
+            if not channel:
+                return
+
+            message = await channel.fetch_message(payload.message_id)
+
+            # Extract YouTube URLs from the message
+            urls = youtube_downloader.extract_youtube_urls(message.content)
+
+            if not urls:
+                logger.info(f"No YouTube URLs found in message {message.id}")
+                return
+
+            logger.info(f"Processing {len(urls)} YouTube URL(s) from message {message.id}")
+
+            # Process each URL
+            for url in urls:
+                asyncio.create_task(process_youtube_video(message, url))
+
+        except Exception as e:
+            logger.error(f"Error handling reaction: {e}")
+            logger.error(traceback.format_exc())
+
+    # Check if it's the Russian flag emoji for translation
+    elif emoji_str == '🇷🇺':
+        # Create unique key for this reaction
+        reaction_key = f"{payload.message_id}_{payload.user_id}_{payload.emoji}"
+        if reaction_key in processed_reactions:
             return
-        
-        logger.info(f"Processing {len(urls)} YouTube URL(s) from message {message.id}")
-        
-        # Process each URL
-        for url in urls:
-            asyncio.create_task(process_youtube_video(message, url))
-            
-    except Exception as e:
-        logger.error(f"Error handling reaction: {e}")
-        logger.error(traceback.format_exc())
+        processed_reactions.add(reaction_key)
+
+        try:
+            # Get the channel and message
+            channel = bot.get_channel(payload.channel_id)
+            if not channel:
+                return
+
+            message = await channel.fetch_message(payload.message_id)
+
+            logger.info(f"Processing translation request for message {message.id}")
+
+            # Process translation
+            asyncio.create_task(process_translation(message, target_lang="ru"))
+
+        except Exception as e:
+            logger.error(f"Error handling translation reaction: {e}")
+            logger.error(traceback.format_exc())
 
 async def process_youtube_video(message: discord.Message, url: str):
     """Process a YouTube video: download, analyze, and respond"""
@@ -274,17 +302,178 @@ async def process_youtube_video(message: discord.Message, url: str):
         if video_path:
             youtube_downloader.cleanup_file(video_path)
 
+async def process_translation(message: discord.Message, target_lang: str = "ru"):
+    """Process translation request for text and/or images"""
+    thread = None
+    status_message = None
+    temp_files = []
+
+    try:
+        # Get or create thread for the message
+        if hasattr(message, 'thread') and message.thread:
+            thread = message.thread
+            logger.info(f"Using existing thread for message {message.id}")
+        else:
+            # Try to create a thread
+            try:
+                thread_name = f"Translation - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                thread = await message.create_thread(name=thread_name[:100])
+                logger.info(f"Created new thread for message {message.id}")
+            except discord.HTTPException as e:
+                if e.code == 160004:  # Thread already exists
+                    # Try to find existing thread
+                    for t in message.guild.threads:
+                        if t.parent_id == message.channel.id:
+                            try:
+                                starter_message = await t.parent.fetch_message(t.id)
+                                if starter_message.id == message.id:
+                                    thread = t
+                                    logger.info(f"Found existing thread {t.id} for message {message.id}")
+                                    break
+                            except:
+                                pass
+
+                    if not thread:
+                        async for t in message.channel.archived_threads(limit=100):
+                            if t.id == message.id:
+                                thread = t
+                                logger.info(f"Found archived thread {t.id} for message {message.id}")
+                                break
+
+                    if not thread:
+                        logger.warning(f"Could not find thread for message {message.id}, using channel")
+                        thread = message.channel
+                else:
+                    raise
+
+        # Send initial status
+        embed = discord.Embed(
+            title="🌐 Translation in Progress",
+            description="Processing your translation request...",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        status_message = await thread.send(embed=embed)
+
+        translations = []
+
+        # Translate text content if present
+        if message.content and message.content.strip():
+            logger.info(f"Translating text content from message {message.id}")
+            try:
+                translated_text = await gemini_processor.translate_text(message.content, target_lang)
+                translations.append({
+                    "type": "text",
+                    "content": translated_text
+                })
+            except Exception as e:
+                logger.error(f"Text translation failed: {e}")
+                translations.append({
+                    "type": "text",
+                    "error": str(e)
+                })
+
+        # Translate images if present
+        if message.attachments:
+            for attachment in message.attachments:
+                # Check if it's an image
+                if attachment.content_type and attachment.content_type.startswith('image/'):
+                    logger.info(f"Processing image attachment: {attachment.filename}")
+                    try:
+                        # Download image to temp file
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(attachment.filename).suffix)
+                        temp_files.append(temp_file.name)
+
+                        await attachment.save(temp_file.name)
+                        logger.info(f"Downloaded image to {temp_file.name}")
+
+                        # Translate image
+                        translated_text = await gemini_processor.translate_image(temp_file.name, target_lang)
+                        translations.append({
+                            "type": "image",
+                            "filename": attachment.filename,
+                            "content": translated_text
+                        })
+                    except Exception as e:
+                        logger.error(f"Image translation failed for {attachment.filename}: {e}")
+                        translations.append({
+                            "type": "image",
+                            "filename": attachment.filename,
+                            "error": str(e)
+                        })
+
+        # Update status to completed
+        if translations:
+            embed.color = discord.Color.green()
+            embed.title = "✅ Translation Complete"
+            embed.description = "Translation has been completed successfully!"
+            await status_message.edit(embed=embed)
+
+            # Send translations
+            for idx, trans in enumerate(translations):
+                if "error" in trans:
+                    error_msg = f"❌ **Translation Failed**\nType: {trans['type']}\nError: {trans['error']}"
+                    if trans['type'] == 'image':
+                        error_msg += f"\nFile: {trans.get('filename', 'Unknown')}"
+                    await thread.send(error_msg)
+                else:
+                    if trans['type'] == 'text':
+                        await thread.send(trans['content'][:2000])
+                    elif trans['type'] == 'image':
+                        header = f"🖼️ **{trans['filename']}**\n\n"
+                        content = trans['content'][:2000 - len(header)]
+                        await thread.send(header + content)
+
+            # Add completion reaction
+            await message.add_reaction('✅')
+        else:
+            embed.color = discord.Color.orange()
+            embed.title = "⚠️ Nothing to Translate"
+            embed.description = "No text or images found in the message."
+            await status_message.edit(embed=embed)
+
+        logger.info(f"Successfully processed translation for message {message.id}")
+
+    except Exception as e:
+        logger.error(f"Error processing translation: {e}")
+        logger.error(traceback.format_exc())
+
+        # Send error message
+        error_embed = discord.Embed(
+            title="❌ Translation Failed",
+            description=f"An error occurred:\n```{str(e)[:500]}```",
+            color=discord.Color.red(),
+            timestamp=datetime.now()
+        )
+
+        if thread:
+            await thread.send(embed=error_embed)
+        else:
+            try:
+                await message.add_reaction('❌')
+            except:
+                pass
+
+    finally:
+        # Clean up temporary files
+        for temp_file in temp_files:
+            try:
+                os.unlink(temp_file)
+                logger.info(f"Deleted temp file: {temp_file}")
+            except Exception as e:
+                logger.warning(f"Could not delete temp file {temp_file}: {e}")
+
 def split_text(text: str, max_length: int) -> list[str]:
     """Split text into chunks that fit Discord's message limits"""
     if len(text) <= max_length:
         return [text]
-    
+
     chunks = []
     current_chunk = ""
-    
+
     # Split by paragraphs first
     paragraphs = text.split('\n\n')
-    
+
     for para in paragraphs:
         # If single paragraph is too long, split by sentences
         if len(para) > max_length:
@@ -304,11 +493,11 @@ def split_text(text: str, max_length: int) -> list[str]:
                 current_chunk = para + '\n\n'
             else:
                 current_chunk += para + '\n\n'
-    
+
     # Add remaining chunk
     if current_chunk:
         chunks.append(current_chunk.strip())
-    
+
     return chunks
 
 @bot.command(name='ping')
