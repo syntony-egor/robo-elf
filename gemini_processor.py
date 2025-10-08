@@ -71,116 +71,77 @@ class GeminiProcessor:
     
     async def _analyze_video(self, video_file, video_metadata: dict = None) -> str:
         """Analyze video with Gemini"""
-        
+
         # Include metadata context if available
         context = ""
         if video_metadata:
             context = f"""
-Video Metadata:
-- Title: {video_metadata.get('title', 'Unknown')}
-- Duration: {video_metadata.get('duration', 0)} seconds
-- Uploader: {video_metadata.get('uploader', 'Unknown')}
-- URL: {video_metadata.get('url', '')}
+Метаданные видео:
+- Название: {video_metadata.get('title', 'Неизвестно')}
+- Длительность: {video_metadata.get('duration', 0)} секунд
+- Автор: {video_metadata.get('uploader', 'Неизвестно')}
 """
-        
+
         prompt = f"""{context}
 
-Please analyze this video and provide:
+Извлеки из этого Zoom-разговора все основные мысли и опиши их кратко, но полно.
 
-1. TRANSCRIPTION:
-   - Provide a complete transcription of all spoken content
-   - Include timestamps in [MM:SS] format at natural breakpoints
-   - Note any significant non-verbal elements in brackets [laughs], [music], etc.
+КРИТИЧНО: Текст должен влезть в 2000 символов!
 
-2. KEY INSIGHTS:
-   - Extract the 5-10 most important points or insights from the video
-   - Focus on actionable takeaways, key concepts, or notable quotes
-   - Be specific and concise
+Формат (на русском):
 
-3. SUMMARY:
-   - Write a 2-3 sentence summary of what the video is about
-   - Focus on the main topic and key message
+📌 **[Тема 1]**
+[2-3 предложения - суть обсуждения, ключевые выводы, важные детали]
 
-Return your response in this JSON format:
-{{
-    "summary": "Brief 2-3 sentence summary",
-    "key_insights": [
-        "Insight 1",
-        "Insight 2",
-        ...
-    ],
-    "transcript": [
-        {{
-            "timestamp": "00:00",
-            "text": "Transcribed text here"
-        }},
-        ...
-    ],
-    "topics": ["topic1", "topic2", ...],
-    "content_type": "tutorial/vlog/lecture/interview/etc"
-}}
+📌 **[Тема 2]**
+[2-3 предложения - суть обсуждения, ключевые выводы, важные детали]
 
-IMPORTANT: Return ONLY valid JSON without any markdown formatting or additional text."""
-        
+📌 **[Тема 3]**
+[2-3 предложения - суть обсуждения, ключевые выводы, важные детали]
+
+...
+
+Правила:
+- Каждая тема описана ЦЕЛИКОМ - читатель должен понять её без видео
+- Без воды, только факты и выводы
+- Если была договорённость или решение - обязательно укажи
+- Пиши простым языком
+- СТРОГО не более 2000 символов в итоге"""
+
         loop = asyncio.get_event_loop()
-        
+
         # Generate response (synchronous operation in executor)
         response = await loop.run_in_executor(
             None,
             lambda: self.model.generate_content([video_file, prompt])
         )
-        
+
         return response.text
     
     def _parse_analysis(self, analysis: str, video_path: str, video_metadata: dict = None) -> Dict[str, Any]:
         """Parse Gemini analysis result"""
-        try:
-            # Clean potential markdown formatting
-            cleaned = analysis.strip()
-            if cleaned.startswith('```'):
-                lines = cleaned.split('\n')
-                cleaned = '\n'.join(lines[1:-1] if lines[-1] == '```' else lines[1:])
-            
-            result = json.loads(cleaned)
-            
-            # Add metadata
-            result["video_file"] = Path(video_path).name
-            result["processed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            
-            if video_metadata:
-                result["video_metadata"] = video_metadata
-            
-            # Ensure all required fields exist
-            if "summary" not in result:
-                result["summary"] = "No summary available"
-            if "key_insights" not in result:
-                result["key_insights"] = []
-            if "transcript" not in result:
-                result["transcript"] = []
-            if "topics" not in result:
-                result["topics"] = []
-            
-            logger.info(f"Parsed analysis with {len(result['key_insights'])} insights "
-                       f"and {len(result['transcript'])} transcript segments")
-            
-            return result
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON: {e}")
-            logger.error(f"Raw response: {analysis[:500]}...")
-            
-            # Return basic structure with raw text
-            return {
-                "video_file": Path(video_path).name,
-                "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "video_metadata": video_metadata,
-                "summary": "Failed to parse structured response",
-                "key_insights": ["Analysis completed but parsing failed - see raw_analysis"],
-                "transcript": [],
-                "topics": [],
-                "raw_analysis": analysis,
-                "error": f"JSON parsing failed: {str(e)}"
-            }
+        # Clean potential markdown formatting
+        cleaned = analysis.strip()
+        if cleaned.startswith('```'):
+            lines = cleaned.split('\n')
+            cleaned = '\n'.join(lines[1:-1] if lines[-1] == '```' else lines[1:])
+
+        # Enforce 2000 character limit
+        if len(cleaned) > 2000:
+            cleaned = cleaned[:2000].rsplit('\n', 1)[0] + "\n\n[обрезано до 2000 символов]"
+
+        logger.info(f"Parsed analysis: {len(cleaned)} characters")
+
+        # Return simple structure with text content
+        return {
+            "video_file": Path(video_path).name,
+            "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "video_metadata": video_metadata,
+            "summary": cleaned,
+            "key_insights": [],
+            "transcript": [],
+            "topics": []
+        }
     
     async def _cleanup_gemini_file(self, video_file):
         """Delete file from Gemini"""

@@ -207,69 +207,17 @@ async def process_youtube_video(message: discord.Message, url: str):
             inline=False
         )
         await status_message.edit(embed=embed)
-        
-        # Send summary
-        summary_embed = discord.Embed(
-            title="📝 Video Summary",
-            description=analysis.get('summary', 'No summary available'),
-            color=discord.Color.gold(),
-            timestamp=datetime.now()
-        )
-        
-        # Add topics if available
-        if analysis.get('topics'):
-            topics_text = ", ".join(f"`{topic}`" for topic in analysis['topics'][:10])
-            summary_embed.add_field(name="Topics", value=topics_text, inline=False)
-        
-        await thread.send(embed=summary_embed)
-        
-        # Send key insights
-        if analysis.get('key_insights'):
-            insights_text = "\n".join([
-                f"{i+1}. {insight}" 
-                for i, insight in enumerate(analysis['key_insights'][:10])
-            ])
-            
-            # Split if too long
-            if len(insights_text) > 1024:
-                insights_chunks = split_text(insights_text, 1024)
-                for i, chunk in enumerate(insights_chunks[:2]):  # Max 2 fields
-                    insights_embed = discord.Embed(
-                        title=f"💡 Key Insights" if i == 0 else "💡 Key Insights (continued)",
-                        description=chunk,
-                        color=discord.Color.blue()
-                    )
-                    await thread.send(embed=insights_embed)
-            else:
-                insights_embed = discord.Embed(
-                    title="💡 Key Insights",
-                    description=insights_text,
-                    color=discord.Color.blue()
-                )
-                await thread.send(embed=insights_embed)
-        
-        # Send transcript
-        if analysis.get('transcript'):
-            await thread.send("## 📜 Full Transcript")
-            
-            # Format transcript
-            transcript_text = ""
-            for segment in analysis['transcript']:
-                timestamp = segment.get('timestamp', '')
-                text = segment.get('text', '')
-                if timestamp:
-                    transcript_text += f"**[{timestamp}]** {text}\n\n"
-                else:
-                    transcript_text += f"{text}\n\n"
-            
-            # Split transcript into Discord-sized chunks
-            if transcript_text:
-                chunks = split_text(transcript_text, 1900)
-                for i, chunk in enumerate(chunks):
-                    # Add page numbers if multiple chunks
-                    if len(chunks) > 1:
-                        chunk = f"**Part {i+1}/{len(chunks)}**\n\n{chunk}"
-                    await thread.send(chunk)
+
+        # Send analysis as plain text
+        analysis_text = analysis.get('summary', 'Анализ недоступен')
+
+        # Split if necessary (Discord limit is 2000 chars per message)
+        if len(analysis_text) <= 2000:
+            await thread.send(analysis_text)
+        else:
+            chunks = split_text(analysis_text, 1900)
+            for chunk in chunks:
+                await thread.send(chunk)
         
         # Add completion reaction
         await message.add_reaction('✅')
