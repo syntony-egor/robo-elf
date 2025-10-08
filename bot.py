@@ -118,20 +118,27 @@ async def process_youtube_video(message: discord.Message, url: str):
     thread = None
     status_message = None
     video_path = None
-    
+
+    # Store IDs instead of objects to survive reconnections
+    channel_id = message.channel.id
+    message_id = message.id
+    thread_id = None
+
     try:
         # Get or create thread for the message
         thread = None
-        
+
         # First check if the message already has a thread
         if hasattr(message, 'thread') and message.thread:
             thread = message.thread
+            thread_id = thread.id
             logger.info(f"Using existing thread for message {message.id}")
         else:
             # Try to create a thread
             try:
                 thread_name = f"Video Analysis - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
                 thread = await message.create_thread(name=thread_name[:100])
+                thread_id = thread.id
                 logger.info(f"Created new thread for message {message.id}")
             except discord.HTTPException as e:
                 if e.code == 160004:  # Thread already exists
@@ -144,20 +151,22 @@ async def process_youtube_video(message: discord.Message, url: str):
                                 starter_message = await t.parent.fetch_message(t.id)
                                 if starter_message.id == message.id:
                                     thread = t
+                                    thread_id = t.id
                                     logger.info(f"Found existing thread {t.id} for message {message.id}")
                                     break
                             except:
                                 # Not the right thread, continue
                                 pass
-                    
+
                     # If we still can't find it, check archived threads
                     if not thread:
                         async for t in message.channel.archived_threads(limit=100):
                             if t.id == message.id:
                                 thread = t
+                                thread_id = t.id
                                 logger.info(f"Found archived thread {t.id} for message {message.id}")
                                 break
-                    
+
                     # Last resort - just use the channel
                     if not thread:
                         logger.warning(f"Could not find thread for message {message.id}, using channel")
@@ -197,7 +206,53 @@ async def process_youtube_video(message: discord.Message, url: str):
         # Process with Gemini
         logger.info(f"Processing with Gemini: {video_path}")
         analysis = await gemini_processor.process_video(video_path, metadata)
-        
+
+        # Save analysis to file for debugging
+        try:
+            analysis_dir = Path("analysis_results")
+            analysis_dir.mkdir(exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            analysis_file = analysis_dir / f"{timestamp}_{Path(video_path).stem}.txt"
+            analysis_file.write_text(analysis.get('summary', 'No analysis'), encoding='utf-8')
+            logger.info(f"Saved analysis to {analysis_file}")
+        except Exception as e:
+            logger.warning(f"Could not save analysis to file: {e}")
+
+        # Refresh Discord objects after long processing to survive reconnections
+        logger.info("Refreshing Discord objects after processing...")
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            logger.error(f"Could not find channel {channel_id}")
+            raise Exception(f"Channel {channel_id} not found after processing")
+
+        # Get fresh message and thread objects
+        try:
+            fresh_message = await channel.fetch_message(message_id)
+        except Exception as e:
+            logger.error(f"Could not fetch message {message_id}: {e}")
+            raise
+
+        # Get the thread - either by ID or fallback to channel
+        if thread_id:
+            try:
+                thread = bot.get_channel(thread_id)
+                if not thread:
+                    # Try to find in guild threads
+                    for t in fresh_message.guild.threads:
+                        if t.id == thread_id:
+                            thread = t
+                            break
+                if not thread:
+                    logger.warning(f"Could not find thread {thread_id}, using channel")
+                    thread = channel
+                else:
+                    logger.info(f"Refreshed thread object: {thread_id}")
+            except Exception as e:
+                logger.warning(f"Error getting thread {thread_id}: {e}, using channel")
+                thread = channel
+        else:
+            thread = channel
+
         # Update status to completed
         embed.color = discord.Color.green()
         embed.set_field_at(
@@ -206,21 +261,36 @@ async def process_youtube_video(message: discord.Message, url: str):
             value="✅ Analysis Complete!",
             inline=False
         )
-        await status_message.edit(embed=embed)
+        try:
+            await status_message.edit(embed=embed)
+        except Exception as e:
+            logger.warning(f"Could not update status message: {e}")
 
         # Send analysis as plain text
         analysis_text = analysis.get('summary', 'Анализ недоступен')
+        logger.info(f"Sending analysis to Discord: {len(analysis_text)} chars")
 
         # Split if necessary (Discord limit is 2000 chars per message)
-        if len(analysis_text) <= 2000:
-            await thread.send(analysis_text)
-        else:
-            chunks = split_text(analysis_text, 1900)
-            for chunk in chunks:
-                await thread.send(chunk)
-        
+        try:
+            if len(analysis_text) <= 2000:
+                await thread.send(analysis_text)
+                logger.info("Analysis sent successfully")
+            else:
+                chunks = split_text(analysis_text, 1900)
+                for i, chunk in enumerate(chunks):
+                    await thread.send(chunk)
+                    logger.info(f"Sent chunk {i+1}/{len(chunks)}")
+        except Exception as e:
+            logger.error(f"Failed to send analysis to Discord: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
         # Add completion reaction
-        await message.add_reaction('✅')
+        try:
+            await fresh_message.add_reaction('✅')
+            logger.info("Added completion reaction")
+        except Exception as e:
+            logger.warning(f"Could not add reaction: {e}")
         
         logger.info(f"Successfully processed video: {url}")
         

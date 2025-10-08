@@ -15,28 +15,49 @@ class GeminiProcessor:
         self.model = genai.GenerativeModel(GEMINI_MODEL)
         logger.info(f"GeminiProcessor initialized with {GEMINI_MODEL}")
     
-    async def process_video(self, video_path: str, video_metadata: dict = None) -> Dict[str, Any]:
+    async def process_video(self, video_path: str, video_metadata: dict = None, max_retries: int = 3) -> Dict[str, Any]:
         """Process video with Gemini and extract transcript and insights"""
         video_file = None
         start_time = time.time()
-        
+        last_error = None
+
         try:
             # Upload video to Gemini
             logger.info(f"Uploading video to Gemini: {Path(video_path).name}")
             video_file = await self._upload_to_gemini(video_path)
-            
-            # Analyze video
-            logger.info("Analyzing video with Gemini...")
-            analysis = await self._analyze_video(video_file, video_metadata)
-            
-            # Parse result
-            result = self._parse_analysis(analysis, video_path, video_metadata)
-            
-            processing_time = time.time() - start_time
-            logger.info(f"Processing completed in {processing_time:.1f} seconds")
-            
-            return result
-            
+
+            # Analyze video with retry logic
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Analyzing video with Gemini (attempt {attempt + 1}/{max_retries})...")
+                    analysis = await self._analyze_video(video_file, video_metadata)
+
+                    # Parse result
+                    result = self._parse_analysis(analysis, video_path, video_metadata)
+
+                    processing_time = time.time() - start_time
+                    logger.info(f"Processing completed in {processing_time:.1f} seconds")
+
+                    return result
+
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {error_str}")
+
+                    # If it's a 500 error or rate limit, retry after delay
+                    if "500" in error_str or "429" in error_str or "quota" in error_str.lower():
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 5  # 5, 10, 15 seconds
+                            logger.info(f"Retrying in {wait_time} seconds...")
+                            await asyncio.sleep(wait_time)
+                            continue
+                    # Other errors - don't retry
+                    raise
+
+            # All retries exhausted
+            raise last_error if last_error else Exception("All retries failed")
+
         finally:
             # Clean up Gemini file
             if video_file:
